@@ -39,11 +39,12 @@ void RdpGamepadProcessor::Stop()
 		mThread.join();
 	}
 
-	// Run() unplugs the pad on its way out, but the connection to the bus itself
-	// is only dropped when the client goes away. Do it here rather than leaving
-	// it to the destructor: when Windows ends the session the process is
-	// terminated where it stands and no destructor ever runs, and a bus that is
-	// still holding this process's connection is a bus that cannot power down.
+	// The only place the pad is ever unplugged and the bus connection dropped:
+	// the pad stays plugged in across reconnects, so nothing earlier does it.
+	// This has to happen here rather than in the destructor because when Windows
+	// ends the session the process is terminated where it stands and no
+	// destructor runs, and a bus still holding a plugged-in pad and this
+	// process's connection is a bus that cannot power down.
 	std::unique_lock<std::mutex> lock{mMutex};
 	mViGEmTarget360 = nullptr;
 	mViGEmClient = nullptr;
@@ -94,7 +95,19 @@ void RdpGamepadProcessor::Run()
 void RdpGamepadProcessor::RdpGamepadTidy()
 {
 	bool bWasConnected = mRdpGamepadConnected;
-	mViGEmTarget360 = nullptr;
+
+	// The pad deliberately stays plugged in rather than being unplugged and
+	// rebuilt around every reconnect, so a flaky session cannot churn it. Each
+	// plug/unplug cycle costs more on the bus driver side than it looks: the
+	// queue holding that pad's notification requests is owned by the bus itself
+	// rather than by the pad, and nothing releases it when the pad goes away, so
+	// every cycle strands one more of them. Neutralise the pad instead and let
+	// Stop() do the single teardown this process ever needs.
+	if (mViGEmTarget360 != nullptr)
+	{
+		mViGEmTarget360->SetGamepadState(XINPUT_GAMEPAD{0});
+	}
+
 	mRdpGamepadChannel->Close();
 	mRdpGamepadConnected = false;
 	mRdpGamepadPollTicks = 0;
@@ -134,16 +147,20 @@ void RdpGamepadProcessor::RdpGamepadProcess()
 	//assert(mRdpGamepadChannel->IsOpen());
 	if (!mRdpGamepadConnected)
 	{
-		//assert(mViGEmTarget360 == nullptr)
-		mViGEmTarget360 = mViGEmClient->CreateController();
+		// Built on the first session that needs it and kept from then on, so a
+		// reconnect reuses the pad that is already plugged in.
 		if (mViGEmTarget360 == nullptr)
 		{
-			// No virtual pad, so there is nothing to forward input to. Back off
-			// and retry instead of reporting a connection and then dereferencing
-			// a pad that was never created.
-			mRdpGamepadOpenRetry = 35;
-			RdpGamepadTidy();
-			return;
+			mViGEmTarget360 = mViGEmClient->CreateController();
+			if (mViGEmTarget360 == nullptr)
+			{
+				// No virtual pad, so there is nothing to forward input to. Back
+				// off and retry instead of reporting a connection and then
+				// dereferencing a pad that was never created.
+				mRdpGamepadOpenRetry = 35;
+				RdpGamepadTidy();
+				return;
+			}
 		}
 
 		mRdpGamepadConnected = true;
