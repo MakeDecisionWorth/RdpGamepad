@@ -1,3 +1,4 @@
 [submodule "ViGEmClient"]
 	path = ViGEmClient
-	url = https://github.com/ViGEm/ViGEmClient.git
+	url = https://github.com/MakeDecisionWorth/ViGEmClient.git
+	branch = fix/x360-notification-thread-lifetime
