@@ -8,25 +8,62 @@
 #pragma comment(lib, "setupapi.lib")
 
 ViGEmTarget360::ViGEmTarget360(std::shared_ptr<ViGEmClient> Client)
+	: mClient(std::move(Client))
+	, mTarget(vigem_target_x360_alloc())
+{}
+
+bool ViGEmTarget360::Connect()
 {
-	mClient = Client;
-	mTarget = vigem_target_x360_alloc();
-	vigem_target_add(mClient->GetHandle(), mTarget);
+	if (mTarget == nullptr)
+	{
+		return false;
+	}
+
+	if (!VIGEM_SUCCESS(vigem_target_add(mClient->GetHandle(), mTarget)))
+	{
+		// Leave the pad unplugged rather than carrying on with a target the bus
+		// never accepted: its serial number is meaningless, and subscribing to
+		// notifications for it would put a worker thread on a request the driver
+		// rejects every time.
+		return false;
+	}
+
+	mConnected = true;
+
+	// Not fatal on failure; the pad just never reports rumble back upstream.
 	vigem_target_x360_register_notification(mClient->GetHandle(), mTarget, &StaticControllerNotification, this);
+
+	return true;
 }
 
 ViGEmTarget360::~ViGEmTarget360()
 {
-	std::unique_lock<std::mutex> lock(mMutex);
+	// No lock held here on purpose. Unregistering blocks until the notification
+	// worker has exited, and that worker takes mMutex in
+	// StaticControllerNotification, so holding it across this call deadlocks the
+	// two against each other.
+	if (mConnected)
+	{
+		vigem_target_x360_unregister_notification(mTarget);
+		vigem_target_remove(mClient->GetHandle(), mTarget);
+		mConnected = false;
+	}
 
-	vigem_target_x360_unregister_notification(mTarget);
-	vigem_target_remove(mClient->GetHandle(), mTarget);
-	vigem_target_free(mTarget);
+	if (mTarget != nullptr)
+	{
+		// Only safe because unregistering above waited for the worker: it reads
+		// through this pointer for as long as it is alive.
+		vigem_target_free(mTarget);
+		mTarget = nullptr;
+	}
 }
 
 void ViGEmTarget360::SetGamepadState(const XINPUT_GAMEPAD& Gamepad)
 {
-	std::unique_lock<std::mutex> lock(mMutex);
+	if (!mConnected)
+	{
+		return;
+	}
 
 	XUSB_REPORT report;
 	report.wButtons = Gamepad.wButtons;
@@ -62,17 +99,47 @@ void ViGEmTarget360::StaticControllerNotification(PVIGEM_CLIENT Client, PVIGEM_T
 }
 
 ViGEmClient::ViGEmClient()
+	: mClient(vigem_alloc())
 {
-	mClient = vigem_alloc();
-	vigem_connect(mClient);
+	if (mClient != nullptr)
+	{
+		mConnected = VIGEM_SUCCESS(vigem_connect(mClient));
+	}
 }
 
 ViGEmClient::~ViGEmClient()
 {
+	if (mClient == nullptr)
+	{
+		return;
+	}
+
+	// vigem_free only calls free(); vigem_disconnect is what closes the handle
+	// on the bus device. Without it the driver keeps this process's connection
+	// open for as long as the receiver runs and never gets the chance to reclaim
+	// whatever was left plugged in.
+	if (mConnected)
+	{
+		vigem_disconnect(mClient);
+		mConnected = false;
+	}
+
 	vigem_free(mClient);
+	mClient = nullptr;
 }
 
 std::unique_ptr<ViGEmTarget360> ViGEmClient::CreateController()
 {
-	return std::unique_ptr<ViGEmTarget360>{new ViGEmTarget360{shared_from_this()}};
+	if (!mConnected)
+	{
+		return nullptr;
+	}
+
+	std::unique_ptr<ViGEmTarget360> Controller{new ViGEmTarget360{shared_from_this()}};
+	if (!Controller->Connect())
+	{
+		return nullptr;
+	}
+
+	return Controller;
 }

@@ -15,7 +15,9 @@ RdpGamepadProcessor::RdpGamepadProcessor(std::function<void()> ConnectionStateCa
 {}
 
 RdpGamepadProcessor::~RdpGamepadProcessor()
-{}
+{
+	Stop();
+}
 
 void RdpGamepadProcessor::Start()
 {
@@ -29,7 +31,22 @@ void RdpGamepadProcessor::Stop()
 		std::unique_lock<std::mutex> lock{mMutex};
 		mKeepRunning = false;
 	}
-	mThread.join();
+
+	// Idempotent: joinable() is false once the thread has already been joined,
+	// which matters because session end and normal teardown can both get here.
+	if (mThread.joinable())
+	{
+		mThread.join();
+	}
+
+	// Run() unplugs the pad on its way out, but the connection to the bus itself
+	// is only dropped when the client goes away. Do it here rather than leaving
+	// it to the destructor: when Windows ends the session the process is
+	// terminated where it stands and no destructor ever runs, and a bus that is
+	// still holding this process's connection is a bus that cannot power down.
+	std::unique_lock<std::mutex> lock{mMutex};
+	mViGEmTarget360 = nullptr;
+	mViGEmClient = nullptr;
 }
 
 bool RdpGamepadProcessor::IsConnected() const
@@ -119,6 +136,16 @@ void RdpGamepadProcessor::RdpGamepadProcess()
 	{
 		//assert(mViGEmTarget360 == nullptr)
 		mViGEmTarget360 = mViGEmClient->CreateController();
+		if (mViGEmTarget360 == nullptr)
+		{
+			// No virtual pad, so there is nothing to forward input to. Back off
+			// and retry instead of reporting a connection and then dereferencing
+			// a pad that was never created.
+			mRdpGamepadOpenRetry = 35;
+			RdpGamepadTidy();
+			return;
+		}
+
 		mRdpGamepadConnected = true;
 		mConnectionStateCallbackPending = true;
 	}

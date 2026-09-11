@@ -228,6 +228,29 @@ private:
 			UpdateNotifyIcon();
 			break;
 
+		case WM_QUERYENDSESSION:
+			// Let the session end, but ask for a little room to unplug the
+			// virtual pad first. The teardown itself belongs in WM_ENDSESSION,
+			// since a shutdown can still be cancelled after this point.
+			ShutdownBlockReasonCreate(mWnd, L"Disconnecting the virtual gamepad");
+			return TRUE;
+
+		case WM_ENDSESSION:
+			// wParam is FALSE when the shutdown was called off, in which case we
+			// carry on running.
+			if (wParam)
+			{
+				// Last chance to run any cleanup at all: once this returns the
+				// session manager terminates us outright, so no destructor gets
+				// to unplug the pad or close the connection to the bus. Leaving
+				// either behind is what stops the ViGEm bus from completing its
+				// power transition, and the machine bugchecks on the way down
+				// rather than here, where the mistake was actually made.
+				mRdpProcessor.Stop();
+			}
+			ShutdownBlockReasonDestroy(mWnd);
+			return 0;
+
 		case WM_DESTROY:
 			HideNotifyIcon();
 			PostQuitMessage(0);
