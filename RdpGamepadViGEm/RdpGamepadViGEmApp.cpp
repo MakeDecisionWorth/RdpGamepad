@@ -171,7 +171,18 @@ private:
 		HMENU hPopupMenu = GetSubMenu(hMenu, 0);
 		POINT cursor;
 		GetCursorPos(&cursor);
+
+		// A menu put up for a notification icon only closes on a click outside
+		// itself while its owner is the foreground window, and the owner only
+		// returns to normal afterwards once it receives another message. Without
+		// both of these the menu sticks on screen until an item is picked, which
+		// on this menu means the only way out is Exit.
+		SetForegroundWindow(mWnd);
+
 		TrackPopupMenuEx(hPopupMenu, TPM_RIGHTALIGN | TPM_RIGHTBUTTON, cursor.x, cursor.y, mWnd, nullptr);
+
+		PostMessage(mWnd, WM_NULL, 0, 0);
+
 		DestroyMenu(hMenu);
 	}
 
